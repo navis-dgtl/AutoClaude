@@ -1,0 +1,60 @@
+{
+  "name": "autoclaude-dxt",
+  "version": "1.1.0",
+  "description": "Natural language workflow automation and scheduling system for Claude Desktop",
+  "main": "server/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server/index.js",
+    "validate": "dxt validate manifest.json",
+    "pack": "dxt pack .",
+    "test": "node server/index.js --test",
+    "dev": "DEBUG_MODE=true node server/index.js",
+    "clean": "rm -rf node_modules package-lock.json",
+    "reinstall": "npm run clean && npm install",
+    "prepare-upload": "npm run clean && rm -f *.dxt"
+  },
+  "keywords": [
+    "automation",
+    "workflow",
+    "scheduling",
+    "cron",
+    "file-management",
+    "system-monitoring",
+    "task-automation",
+    "claude",
+    "mcp-server",
+    "dxt"
+  ],
+  "author": {
+    "name": "Navis.Digital",
+    "email": "navis.dgtl@gmail.com",
+    "url": "https://github.com/navis-dgtl"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.13.2",
+    "chokidar": "^3.5.3",
+    "glob": "^10.3.10",
+    "node-cron": "^3.0.3",
+    "uuid": "^9.0.1"
+  },
+  "devDependencies": {
+    "@anthropic-ai/dxt": "^0.2.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/navis-dgtl/autoclaude-dxt"
+  },
+  "files": [
+    "server/",
+    "manifest.json",
+    "README.md",
+    "icon.png",
+    "data/",
+    "logs/"
+  ]
+}

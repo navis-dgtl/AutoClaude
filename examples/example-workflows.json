@@ -1,0 +1,81 @@
+{
+  "example_workflows": [
+    {
+      "request": "Move all screenshots from Desktop to Screenshots folder daily at 9 AM",
+      "parsed_result": {
+        "name": "Daily Move Screenshots",
+        "description": "Move all screenshots from Desktop to Screenshots folder daily at 9 AM",
+        "triggers": [
+          {
+            "type": "schedule",
+            "cron": "0 9 * * *",
+            "description": "Daily at 9:00 AM"
+          }
+        ],
+        "steps": [
+          {
+            "id": "step-1",
+            "type": "file_operation",
+            "operation": "move",
+            "source": "~/Desktop",
+            "destination": "~/Documents/Screenshots",
+            "pattern": "*.png",
+            "description": "move *.png files from Desktop to Screenshots"
+          },
+          {
+            "id": "step-2",
+            "type": "file_operation",
+            "operation": "move",
+            "source": "~/Desktop",
+            "destination": "~/Documents/Screenshots",
+            "pattern": "*screenshot*.*",
+            "description": "move *screenshot*.* files from Desktop to Screenshots"
+          }
+        ]
+      }
+    },
+    {
+      "request": "Every hour, backup images from Downloads to Pictures folder",
+      "parsed_result": {
+        "name": "Hourly Copy Images",
+        "description": "Every hour, backup images from Downloads to Pictures folder",
+        "triggers": [
+          {
+            "type": "schedule",
+            "cron": "0 * * * *",
+            "description": "Every hour"
+          }
+        ],
+        "steps": [
+          {
+            "id": "step-1",
+            "type": "file_operation",
+            "operation": "copy",
+            "source": "~/Downloads",
+            "destination": "~/Pictures",
+            "pattern": "*.jpg",
+            "description": "copy *.jpg files from Downloads to Pictures"
+          },
+          {
+            "id": "step-2",
+            "type": "file_operation",
+            "operation": "copy",
+            "source": "~/Downloads",
+            "destination": "~/Pictures",
+            "pattern": "*.png",
+            "description": "copy *.png files from Downloads to Pictures"
+          },
+          {
+            "id": "step-3",
+            "type": "file_operation",
+            "operation": "copy",
+            "source": "~/Downloads",
+            "destination": "~/Pictures",
+            "pattern": "*.gif",
+            "description": "copy *.gif files from Downloads to Pictures"
+          }
+        ]
+      }
+    }
+  ]
+}

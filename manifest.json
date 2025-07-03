@@ -1,0 +1,77 @@
+{
+  "dxt_version": "0.1",
+  "name": "autoclaude",
+  "display_name": "AutoClaude - Automation & Workflow Manager",
+  "version": "1.1.0",
+  "description": "Natural language workflow automation and scheduling system for Claude Desktop",
+  "long_description": "AutoClaude enables you to create, manage, and execute automated workflows using natural language. Describe what you want to automate in plain English, and Claude will create scheduled tasks, file operations, system monitoring, and complex multi-step workflows that run locally on your machine. Features include cron-style scheduling, file system event monitoring, execution history, comprehensive workflow management, and full cross-platform support. Version 1.1.0 includes working natural language processing, cross-platform file operations, memory leak fixes, and enhanced security.",
+  "author": {
+    "name": "Navis.Digital",
+    "email": "navis.dgtl@gmail.com",
+    "url": "https://github.com/navis-dgtl"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/navis-dgtl/autoclaude-dxt"
+  },
+  "homepage": "https://github.com/navis-dgtl/autoclaude-dxt",
+  "keywords": [
+    "automation",
+    "workflow",
+    "scheduling",
+    "cron",
+    "file-management",
+    "system-monitoring",
+    "task-automation",
+    "claude",
+    "mcp-server"
+  ],
+  "license": "MIT",
+  "compatibility": {
+    "claude_desktop": ">=0.10.0",
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": {
+      "node": ">=16.0.0"
+    }
+  },
+  "server": {
+    "type": "node",
+    "entry_point": "server/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/server/index.js"],
+      "env": {
+        "AUTOCLAUDE_DATA_DIR": "${__dirname}/data",
+        "AUTOCLAUDE_LOGS_DIR": "${__dirname}/logs"
+      }
+    }
+  },
+  "user_config": {
+    "allowed_directories": {
+      "type": "string",
+      "title": "Allowed Directories",
+      "description": "Comma-separated list of directories that workflows can access and modify",
+      "default": "${HOME}/Desktop,${HOME}/Documents,${HOME}/Downloads"
+    },
+    "max_execution_time": {
+      "type": "number",
+      "title": "Maximum Execution Time (seconds)",
+      "description": "Maximum time allowed for workflow step execution",
+      "default": 300
+    },
+    "enable_system_commands": {
+      "type": "boolean",
+      "title": "Enable System Commands",
+      "description": "Allow workflows to execute system commands and scripts",
+      "default": false,
+      "sensitive": true
+    },
+    "log_retention_days": {
+      "type": "number",
+      "title": "Log Retention (days)",
+      "description": "Number of days to keep workflow execution logs",
+      "default": 30
+    }
+  },
+  "icon": "icon.png"
+}

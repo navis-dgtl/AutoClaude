@@ -1,0 +1,779 @@
+#!/usr/bin/env node
+
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import {
+  CallToolRequestSchema,
+  ListToolsRequestSchema,
+} from "@modelcontextprotocol/sdk/types.js";
+import { execFile, spawn } from "child_process";
+import { promisify } from "util";
+import { readFile, writeFile, mkdir, access, readdir, stat } from "fs/promises";
+import { join, dirname, resolve, extname } from "path";
+import { fileURLToPath } from "url";
+import cron from "node-cron";
+import chokidar from "chokidar";
+import { glob } from "glob";
+import { v4 as uuidv4 } from "uuid";
+
+const execFileAsync = promisify(execFile);
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+// Configuration - handles both comma-separated string and array formats
+const parseAllowedDirectories = (dirs) => {
+  if (typeof dirs === 'string') {
+    return dirs.split(',').map(d => d.trim());
+  }
+  return dirs || [process.env.HOME + "/Desktop", process.env.HOME + "/Documents", process.env.HOME + "/Downloads"];
+};
+
+const CONFIG = {
+  MAX_EXECUTION_TIME: (process.env.AUTOCLAUDE_MAX_EXECUTION_TIME ? 
+    parseInt(process.env.AUTOCLAUDE_MAX_EXECUTION_TIME) * 1000 : 300000), // Convert seconds to milliseconds
+  MAX_LOG_SIZE: 10 * 1024 * 1024, // 10MB
+  LOG_RETENTION_DAYS: process.env.AUTOCLAUDE_LOG_RETENTION_DAYS ? 
+    parseInt(process.env.AUTOCLAUDE_LOG_RETENTION_DAYS) : 30,
+  DATA_DIR: process.env.AUTOCLAUDE_DATA_DIR || join(__dirname, "..", "data"),
+  LOGS_DIR: process.env.AUTOCLAUDE_LOGS_DIR || join(__dirname, "..", "logs"),
+  ALLOWED_DIRECTORIES: parseAllowedDirectories(process.env.AUTOCLAUDE_ALLOWED_DIRS),
+  ENABLE_SYSTEM_COMMANDS: process.env.AUTOCLAUDE_ENABLE_SYSTEM_COMMANDS === "true"
+};
+
+class AutoClaudeServer {
+  constructor() {
+    this.server = new Server(
+      {
+        name: "autoclaude",
+        version: "1.0.0",
+      },
+      {
+        capabilities: {
+          tools: {},
+        },
+      }
+    );
+
+    this.workflows = new Map();
+    this.scheduledJobs = new Map();
+    this.fileWatchers = new Map();
+    this.executionHistory = [];
+    this.activeProcesses = new Map();
+
+    this.setupDirectories();
+    this.loadWorkflows();
+    this.setupHandlers();
+  }
+
+  async setupDirectories() {
+    try {
+      await mkdir(CONFIG.DATA_DIR, { recursive: true });
+      await mkdir(CONFIG.LOGS_DIR, { recursive: true });
+    } catch (error) {
+      console.error("Failed to create directories:", error);
+    }
+  }
+
+  async loadWorkflows() {
+    try {
+      const workflowsFile = join(CONFIG.DATA_DIR, "workflows.json");
+      await access(workflowsFile);
+      const data = await readFile(workflowsFile, "utf8");
+      const workflows = JSON.parse(data);
+      
+      for (const workflow of workflows) {
+        this.workflows.set(workflow.id, workflow);
+        if (workflow.enabled && workflow.triggers) {
+          await this.setupTriggers(workflow);
+        }
+      }
+    } catch (error) {
+      // File doesn't exist yet, that's fine
+      console.log("No existing workflows found, starting fresh");
+    }
+  }
+
+  async saveWorkflows() {
+    try {
+      const workflowsArray = Array.from(this.workflows.values());
+      const workflowsFile = join(CONFIG.DATA_DIR, "workflows.json");
+      await writeFile(workflowsFile, JSON.stringify(workflowsArray, null, 2));
+    } catch (error) {
+      console.error("Failed to save workflows:", error);
+    }
+  }
+
+  async setupTriggers(workflow) {
+    for (const trigger of workflow.triggers) {
+      switch (trigger.type) {
+        case "schedule":
+          this.setupScheduleTrigger(workflow.id, trigger);
+          break;
+        case "file_event":
+          await this.setupFileEventTrigger(workflow.id, trigger);
+          break;
+        case "time_based":
+          this.setupTimeBasedTrigger(workflow.id, trigger);
+          break;
+      }
+    }
+  }
+
+  setupScheduleTrigger(workflowId, trigger) {
+    if (cron.validate(trigger.cron)) {
+      const job = cron.schedule(trigger.cron, () => {
+        this.executeWorkflow(workflowId, { trigger: "schedule", cron: trigger.cron });
+      }, { scheduled: false });
+      
+      job.start();
+      this.scheduledJobs.set(`${workflowId}_${trigger.id}`, job);
+    }
+  }
+
+  async setupFileEventTrigger(workflowId, trigger) {
+    const watcher = chokidar.watch(trigger.path, {
+      ignored: trigger.ignored || /(^|[\/\\])\../,
+      persistent: true,
+      usePolling: trigger.usePolling || false
+    });
+
+    watcher.on(trigger.event, (path) => {
+      this.executeWorkflow(workflowId, { 
+        trigger: "file_event", 
+        event: trigger.event, 
+        path 
+      });
+    });
+
+    this.fileWatchers.set(`${workflowId}_${trigger.id}`, watcher);
+  }
+
+  setupTimeBasedTrigger(workflowId, trigger) {
+    const delay = new Date(trigger.datetime) - new Date();
+    if (delay > 0) {
+      const timeout = setTimeout(() => {
+        this.executeWorkflow(workflowId, { trigger: "time_based", datetime: trigger.datetime });
+      }, delay);
+      
+      this.scheduledJobs.set(`${workflowId}_${trigger.id}`, { timeout });
+    }
+  }
+
+  async executeWorkflow(workflowId, context = {}) {
+    const workflow = this.workflows.get(workflowId);
+    if (!workflow || !workflow.enabled) {
+      return;
+    }
+
+    const executionId = uuidv4();
+    const execution = {
+      id: executionId,
+      workflowId,
+      workflowName: workflow.name,
+      startTime: new Date().toISOString(),
+      context,
+      steps: [],
+      status: "running"
+    };
+
+    this.executionHistory.push(execution);
+    await this.logExecution(execution, "Workflow execution started");
+
+    try {
+      for (const step of workflow.steps) {
+        const stepResult = await this.executeStep(step, context, executionId);
+        execution.steps.push(stepResult);
+        
+        if (stepResult.status === "failed" && step.onError !== "continue") {
+          execution.status = "failed";
+          execution.error = stepResult.error;
+          break;
+        }
+      }
+
+      if (execution.status === "running") {
+        execution.status = "completed";
+      }
+    } catch (error) {
+      execution.status = "failed";
+      execution.error = error.message;
+    }
+
+    execution.endTime = new Date().toISOString();
+    execution.duration = new Date(execution.endTime) - new Date(execution.startTime);
+    
+    await this.logExecution(execution, `Workflow execution ${execution.status}`);
+  }
+
+  async executeStep(step, context, executionId) {
+    const stepExecution = {
+      stepId: step.id,
+      stepType: step.type,
+      startTime: new Date().toISOString(),
+      status: "running"
+    };
+
+    try {
+      switch (step.type) {
+        case "file_operation":
+          await this.executeFileOperation(step, context);
+          break;
+        case "command":
+          if (!CONFIG.ENABLE_SYSTEM_COMMANDS) {
+            throw new Error("System commands are disabled");
+          }
+          await this.executeCommand(step, context, executionId);
+          break;
+        case "condition":
+          const conditionResult = await this.evaluateCondition(step.condition, context);
+          if (!conditionResult && step.onFalse === "stop") {
+            stepExecution.status = "skipped";
+            return stepExecution;
+          }
+          break;
+        case "loop":
+          await this.executeLoop(step, context, executionId);
+          break;
+        default:
+          throw new Error(`Unknown step type: ${step.type}`);
+      }
+
+      stepExecution.status = "completed";
+    } catch (error) {
+      stepExecution.status = "failed";
+      stepExecution.error = error.message;
+    }
+
+    stepExecution.endTime = new Date().toISOString();
+    stepExecution.duration = new Date(stepExecution.endTime) - new Date(stepExecution.startTime);
+    
+    return stepExecution;
+  }
+
+  async executeFileOperation(step, context) {
+    const { operation, source, destination, pattern, options = {} } = step;
+    
+    // Validate paths
+    if (source && !this.isPathAllowed(source)) {
+      throw new Error(`Access denied to path: ${source}`);
+    }
+    if (destination && !this.isPathAllowed(destination)) {
+      throw new Error(`Access denied to path: ${destination}`);
+    }
+
+    switch (operation) {
+      case "move":
+        await this.moveFiles(source, destination, pattern);
+        break;
+      case "copy":
+        await this.copyFiles(source, destination, pattern);
+        break;
+      case "delete":
+        await this.deleteFiles(source, pattern);
+        break;
+      case "create_directory":
+        await mkdir(source, { recursive: true });
+        break;
+      case "archive":
+        await this.archiveFiles(source, destination, options);
+        break;
+      default:
+        throw new Error(`Unknown file operation: ${operation}`);
+    }
+  }
+
+  async executeCommand(step, context, executionId) {
+    const { command, args = [], workingDirectory, timeout = CONFIG.MAX_EXECUTION_TIME } = step;
+    
+    return new Promise((resolve, reject) => {
+      const process = spawn(command, args, {
+        cwd: workingDirectory,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout
+      });
+
+      this.activeProcesses.set(executionId, process);
+
+      let stdout = "";
+      let stderr = "";
+
+      process.stdout.on('data', (data) => {
+        stdout += data.toString();
+      });
+
+      process.stderr.on('data', (data) => {
+        stderr += data.toString();
+      });
+
+      process.on('close', (code) => {
+        this.activeProcesses.delete(executionId);
+        if (code === 0) {
+          resolve({ stdout, stderr, exitCode: code });
+        } else {
+          reject(new Error(`Command failed with exit code ${code}: ${stderr}`));
+        }
+      });
+
+      process.on('error', (error) => {
+        this.activeProcesses.delete(executionId);
+        reject(error);
+      });
+
+      // Cleanup timeout
+      setTimeout(() => {
+        if (this.activeProcesses.has(executionId)) {
+          process.kill('SIGTERM');
+          this.activeProcesses.delete(executionId);
+          reject(new Error("Command execution timeout"));
+        }
+      }, timeout);
+    });
+  }
+
+  async moveFiles(source, destination, pattern) {
+    const files = pattern ? await glob(pattern, { cwd: source }) : [source];
+    
+    for (const file of files) {
+      const srcPath = pattern ? join(source, file) : file;
+      const destPath = pattern ? join(destination, file) : destination;
+      
+      await mkdir(dirname(destPath), { recursive: true });
+      await execFileAsync('mv', [srcPath, destPath]);
+    }
+  }
+
+  async copyFiles(source, destination, pattern) {
+    const files = pattern ? await glob(pattern, { cwd: source }) : [source];
+    
+    for (const file of files) {
+      const srcPath = pattern ? join(source, file) : file;
+      const destPath = pattern ? join(destination, file) : destination;
+      
+      await mkdir(dirname(destPath), { recursive: true });
+      await execFileAsync('cp', ['-r', srcPath, destPath]);
+    }
+  }
+
+  async deleteFiles(source, pattern) {
+    const files = pattern ? await glob(pattern, { cwd: source }) : [source];
+    
+    for (const file of files) {
+      const filePath = pattern ? join(source, file) : file;
+      await execFileAsync('rm', ['-rf', filePath]);
+    }
+  }
+
+  isPathAllowed(path) {
+    const resolvedPath = resolve(path);
+    return CONFIG.ALLOWED_DIRECTORIES.some(allowedDir => 
+      resolvedPath.startsWith(resolve(allowedDir))
+    );
+  }
+
+  async logExecution(execution, message) {
+    const logEntry = {
+      timestamp: new Date().toISOString(),
+      executionId: execution.id,
+      workflowId: execution.workflowId,
+      message,
+      execution: JSON.stringify(execution, null, 2)
+    };
+
+    const logFile = join(CONFIG.LOGS_DIR, `autoclaude-${new Date().toISOString().split('T')[0]}.log`);
+    const logLine = JSON.stringify(logEntry) + '\n';
+    
+    try {
+      await writeFile(logFile, logLine, { flag: 'a' });
+    } catch (error) {
+      console.error("Failed to write log:", error);
+    }
+  }
+
+  setupHandlers() {
+    // List all available tools
+    this.server.setRequestHandler(ListToolsRequestSchema, async () => {
+      return {
+        tools: [
+          {
+            name: "create_workflow",
+            description: "Create a new automation workflow from natural language description",
+            inputSchema: {
+              type: "object",
+              properties: {
+                name: { type: "string", description: "Workflow name" },
+                description: { type: "string", description: "Natural language description of what to automate" },
+                triggers: {
+                  type: "array",
+                  description: "When the workflow should run",
+                  items: {
+                    type: "object",
+                    properties: {
+                      type: { type: "string", enum: ["schedule", "file_event", "time_based"] },
+                      cron: { type: "string", description: "Cron expression for schedule triggers" },
+                      path: { type: "string", description: "Path to watch for file events" },
+                      event: { type: "string", enum: ["add", "change", "unlink"], description: "File event type" },
+                      datetime: { type: "string", description: "ISO datetime for time-based triggers" }
+                    }
+                  }
+                }
+              },
+              required: ["name", "description"]
+            }
+          },
+          {
+            name: "list_workflows",
+            description: "List all automation workflows",
+            inputSchema: {
+              type: "object",
+              properties: {
+                status: { type: "string", enum: ["all", "enabled", "disabled"], default: "all" }
+              }
+            }
+          },
+          {
+            name: "enable_workflow",
+            description: "Enable a workflow to start running",
+            inputSchema: {
+              type: "object",
+              properties: {
+                workflowId: { type: "string", description: "Workflow ID" }
+              },
+              required: ["workflowId"]
+            }
+          },
+          {
+            name: "disable_workflow",
+            description: "Disable a workflow to stop it from running",
+            inputSchema: {
+              type: "object",
+              properties: {
+                workflowId: { type: "string", description: "Workflow ID" }
+              },
+              required: ["workflowId"]
+            }
+          },
+          {
+            name: "delete_workflow",
+            description: "Delete a workflow permanently",
+            inputSchema: {
+              type: "object",
+              properties: {
+                workflowId: { type: "string", description: "Workflow ID" }
+              },
+              required: ["workflowId"]
+            }
+          },
+          {
+            name: "execute_workflow",
+            description: "Manually execute a workflow now",
+            inputSchema: {
+              type: "object",
+              properties: {
+                workflowId: { type: "string", description: "Workflow ID" }
+              },
+              required: ["workflowId"]
+            }
+          },
+          {
+            name: "get_execution_history",
+            description: "Get workflow execution history and logs",
+            inputSchema: {
+              type: "object",
+              properties: {
+                workflowId: { type: "string", description: "Filter by workflow ID (optional)" },
+                limit: { type: "integer", default: 50, description: "Maximum number of executions to return" }
+              }
+            }
+          },
+          {
+            name: "interpret_automation",
+            description: "Convert natural language automation request into structured workflow",
+            inputSchema: {
+              type: "object",
+              properties: {
+                request: { type: "string", description: "Natural language description of automation needed" }
+              },
+              required: ["request"]
+            }
+          }
+        ]
+      };
+    });
+
+    // Handle tool execution
+    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+      try {
+        const { name, arguments: args } = request.params;
+
+        switch (name) {
+          case "create_workflow":
+            return await this.createWorkflow(args);
+          case "list_workflows":
+            return await this.listWorkflows(args);
+          case "enable_workflow":
+            return await this.enableWorkflow(args);
+          case "disable_workflow":
+            return await this.disableWorkflow(args);
+          case "delete_workflow":
+            return await this.deleteWorkflow(args);
+          case "execute_workflow":
+            return await this.manualExecuteWorkflow(args);
+          case "get_execution_history":
+            return await this.getExecutionHistory(args);
+          case "interpret_automation":
+            return await this.interpretAutomation(args);
+          default:
+            throw new Error(`Unknown tool: ${name}`);
+        }
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error: ${error.message}`
+            }
+          ],
+          isError: true
+        };
+      }
+    });
+  }
+
+  async createWorkflow(args) {
+    const { name, description, triggers = [] } = args;
+    
+    const workflow = {
+      id: uuidv4(),
+      name,
+      description,
+      triggers,
+      steps: [], // Will be populated by interpret_automation
+      enabled: false,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+
+    this.workflows.set(workflow.id, workflow);
+    await this.saveWorkflows();
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Created workflow "${name}" with ID: ${workflow.id}\n\nNext, use interpret_automation to convert your description into actionable steps.`
+        }
+      ]
+    };
+  }
+
+  async interpretAutomation(args) {
+    const { request } = args;
+    
+    // This is where Claude's intelligence shines - interpreting natural language
+    // For now, we'll provide a structured response that Claude can work with
+    
+    const interpretation = {
+      description: request,
+      suggestedSteps: [
+        {
+          type: "analysis",
+          message: "I need to analyze your automation request and convert it into executable steps."
+        }
+      ],
+      detectedPatterns: {
+        fileOperations: request.toLowerCase().includes("move") || request.toLowerCase().includes("copy") || request.toLowerCase().includes("file"),
+        scheduling: request.toLowerCase().includes("daily") || request.toLowerCase().includes("schedule") || request.toLowerCase().includes("time"),
+        commands: request.toLowerCase().includes("run") || request.toLowerCase().includes("execute"),
+        conditions: request.toLowerCase().includes("if") || request.toLowerCase().includes("when")
+      }
+    };
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Analysis of automation request: "${request}"\n\nDetected patterns:\n- File operations: ${interpretation.detectedPatterns.fileOperations}\n- Scheduling: ${interpretation.detectedPatterns.scheduling}\n- Commands: ${interpretation.detectedPatterns.commands}\n- Conditions: ${interpretation.detectedPatterns.conditions}\n\nI can help you build this automation step by step. What specific actions should this workflow perform?`
+        }
+      ]
+    };
+  }
+
+  async listWorkflows(args) {
+    const { status = "all" } = args;
+    const workflows = Array.from(this.workflows.values());
+    
+    const filtered = status === "all" ? workflows : 
+                    workflows.filter(w => status === "enabled" ? w.enabled : !w.enabled);
+
+    const workflowList = filtered.map(w => ({
+      id: w.id,
+      name: w.name,
+      description: w.description,
+      enabled: w.enabled,
+      triggers: w.triggers.length,
+      steps: w.steps.length,
+      createdAt: w.createdAt
+    }));
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Found ${workflowList.length} workflows:\n\n${workflowList.map(w => 
+            `• ${w.name} (${w.id})\n  Status: ${w.enabled ? 'Enabled' : 'Disabled'}\n  Triggers: ${w.triggers}\n  Steps: ${w.steps}\n  Created: ${w.createdAt}\n`
+          ).join('\n')}`
+        }
+      ]
+    };
+  }
+
+  async enableWorkflow(args) {
+    const { workflowId } = args;
+    const workflow = this.workflows.get(workflowId);
+    
+    if (!workflow) {
+      throw new Error(`Workflow not found: ${workflowId}`);
+    }
+
+    workflow.enabled = true;
+    workflow.updatedAt = new Date().toISOString();
+    
+    await this.setupTriggers(workflow);
+    await this.saveWorkflows();
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Enabled workflow "${workflow.name}" (${workflowId})`
+        }
+      ]
+    };
+  }
+
+  async disableWorkflow(args) {
+    const { workflowId } = args;
+    const workflow = this.workflows.get(workflowId);
+    
+    if (!workflow) {
+      throw new Error(`Workflow not found: ${workflowId}`);
+    }
+
+    workflow.enabled = false;
+    workflow.updatedAt = new Date().toISOString();
+    
+    // Clean up triggers
+    for (const [key, job] of this.scheduledJobs.entries()) {
+      if (key.startsWith(workflowId)) {
+        if (job.destroy) job.destroy();
+        if (job.timeout) clearTimeout(job.timeout);
+        this.scheduledJobs.delete(key);
+      }
+    }
+
+    for (const [key, watcher] of this.fileWatchers.entries()) {
+      if (key.startsWith(workflowId)) {
+        watcher.close();
+        this.fileWatchers.delete(key);
+      }
+    }
+
+    await this.saveWorkflows();
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Disabled workflow "${workflow.name}" (${workflowId})`
+        }
+      ]
+    };
+  }
+
+  async deleteWorkflow(args) {
+    const { workflowId } = args;
+    const workflow = this.workflows.get(workflowId);
+    
+    if (!workflow) {
+      throw new Error(`Workflow not found: ${workflowId}`);
+    }
+
+    // Disable first to clean up triggers
+    await this.disableWorkflow(args);
+    
+    this.workflows.delete(workflowId);
+    await this.saveWorkflows();
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Deleted workflow "${workflow.name}" (${workflowId})`
+        }
+      ]
+    };
+  }
+
+  async manualExecuteWorkflow(args) {
+    const { workflowId } = args;
+    const workflow = this.workflows.get(workflowId);
+    
+    if (!workflow) {
+      throw new Error(`Workflow not found: ${workflowId}`);
+    }
+
+    // Execute in background
+    this.executeWorkflow(workflowId, { trigger: "manual" });
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Started manual execution of workflow "${workflow.name}" (${workflowId})`
+        }
+      ]
+    };
+  }
+
+  async getExecutionHistory(args) {
+    const { workflowId, limit = 50 } = args;
+    
+    let history = this.executionHistory;
+    if (workflowId) {
+      history = history.filter(h => h.workflowId === workflowId);
+    }
+
+    history = history.slice(-limit).reverse(); // Most recent first
+
+    const summary = history.map(h => ({
+      id: h.id,
+      workflowName: h.workflowName,
+      status: h.status,
+      startTime: h.startTime,
+      duration: h.duration,
+      stepsCompleted: h.steps.filter(s => s.status === 'completed').length,
+      totalSteps: h.steps.length
+    }));
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Execution history (${summary.length} entries):\n\n${summary.map(h => 
+            `• ${h.workflowName} - ${h.status.toUpperCase()}\n  Started: ${h.startTime}\n  Duration: ${h.duration}ms\n  Steps: ${h.stepsCompleted}/${h.totalSteps}\n`
+          ).join('\n')}`
+        }
+      ]
+    };
+  }
+}
+
+// Start the server
+const autoClaudeServer = new AutoClaudeServer();
+const transport = new StdioServerTransport();
+autoClaudeServer.server.connect(transport);
+
+console.error("AutoClaude Automation & Workflow Manager running...");
+console.error(`Data directory: ${CONFIG.DATA_DIR}`);
+console.error(`Logs directory: ${CONFIG.LOGS_DIR}`);
+console.error(`System commands enabled: ${CONFIG.ENABLE_SYSTEM_COMMANDS}`);

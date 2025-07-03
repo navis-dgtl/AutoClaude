@@ -1,0 +1,56 @@
+#!/usr/bin/env node
+
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import {
+  CallToolRequestSchema,
+  ListToolsRequestSchema,
+} from "@modelcontextprotocol/sdk/types.js";
+import { execFile, spawn } from "child_process";
+import { promisify } from "util";
+import { readFile, writeFile, mkdir, access, readdir, stat } from "fs/promises";
+import { join, dirname, resolve, extname } from "path";
+import { fileURLToPath } from "url";
+import cron from "node-cron";
+import chokidar from "chokidar";
+import { glob } from "glob";
+import { v4 as uuidv4 } from "uuid";
+
+const execFileAsync = promisify(execFile);
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+// Configuration - handles both comma-separated string and array formats
+const parseAllowedDirectories = (dirs) => {
+  if (typeof dirs === 'string') {
+    return dirs.split(',').map(d => d.trim());
+  }
+  return dirs || [process.env.HOME + "/Desktop", process.env.HOME + "/Documents", process.env.HOME + "/Downloads"];
+};
+const CONFIG = {
+  MAX_EXECUTION_TIME: (process.env.AUTOCLAUDE_MAX_EXECUTION_TIME ? 
+    parseInt(process.env.AUTOCLAUDE_MAX_EXECUTION_TIME) * 1000 : 300000), // Convert seconds to milliseconds
+  MAX_LOG_SIZE: 10 * 1024 * 1024, // 10MB
+  LOG_RETENTION_DAYS: process.env.AUTOCLAUDE_LOG_RETENTION_DAYS ? 
+    parseInt(process.env.AUTOCLAUDE_LOG_RETENTION_DAYS) : 30,
+  DATA_DIR: process.env.AUTOCLAUDE_DATA_DIR || join(__dirname, "..", "data"),
+  LOGS_DIR: process.env.AUTOCLAUDE_LOGS_DIR || join(__dirname, "..", "logs"),
+  ALLOWED_DIRECTORIES: parseAllowedDirectories(process.env.AUTOCLAUDE_ALLOWED_DIRS),
+  ENABLE_SYSTEM_COMMANDS: process.env.AUTOCLAUDE_ENABLE_SYSTEM_COMMANDS === "true"
+};
+
+class AutoClaudeServer {
+  constructor() {
+    this.server = new Server(
+      {
+        name: "autoclaude",
+        version: "1.0.0",
+      },
+      {
+        capabilities: {
+          tools: {},
+        },
+      }
+    );
+
+    this.workflows = new Map();
