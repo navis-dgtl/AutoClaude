@@ -1,10 +1,11 @@
-# AutoClaude - Automation & Workflow Manager (v1.1.0)
+# AutoClaude - Automation & Workflow Manager (v1.2.0)
 
 ## 🤖 Natural Language Automation for Claude Desktop
 
 AutoClaude transforms your automation ideas into working workflows using natural language. Simply describe what you want to automate, and Claude will create, schedule, and manage the automation for you.
 
-### 🆕 What's New in v1.1.0
+### 🆕 What's New in v1.2.0
+- **✅ Directory Selection UI**: Changed from comma-separated string input to multiple directory selection
 - **✅ Full Natural Language Processing**: Actually converts your requests into executable workflows
 - **✅ Cross-Platform Support**: Works on Windows, macOS, and Linux
 - **✅ Enhanced Security**: Better path validation and memory management

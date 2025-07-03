@@ -35,9 +35,20 @@ const parseAllowedDirectories = (dirs) => {
     join(homedir(), "Downloads")
   ];
   
+  // Handle command line arguments from directory picker
+  if (process.argv.length > 2) {
+    // Arguments come after the script name
+    const cliDirs = process.argv.slice(2).filter(arg => arg && arg.trim());
+    if (cliDirs.length > 0) {
+      return cliDirs.map(expandPath);
+    }
+  }
+  
+  // Fall back to environment variable
   if (typeof dirs === 'string') {
     return dirs.split(',').map(d => expandPath(d.trim()));
   }
+  
   return dirs ? dirs.map(expandPath) : defaultDirs;
 };
 const CONFIG = {
@@ -197,10 +208,49 @@ class NaturalLanguageParser {
       source = join(homedir(), "Downloads");
     }
     
-    // Extract destination folder names from text
-    const folderMatch = text.match(/to\s+(?:a\s+)?(\w+)\s+folder/i);
+    // Extract destination folder names from text - handle subdirectories
+    const folderMatch = text.match(/to\s+(?:a\s+)?([\/\w\s]+?)\s+folder/i);
     if (folderMatch) {
-      destination = join(homedir(), "Documents", folderMatch[1]);
+      const folderPath = folderMatch[1].trim();
+      
+      // Check if it's a path with subdirectories
+      if (folderPath.includes('/')) {
+        // Handle paths like "Documents/Screenshots"
+        const parts = folderPath.split('/').map(p => p.trim());
+        if (parts[0].toLowerCase() === 'documents') {
+          destination = join(homedir(), ...parts);
+        } else {
+          destination = join(homedir(), "Documents", ...parts);
+        }
+      } else {
+        // Single folder name - check common locations
+        const folderName = folderPath;
+        
+        // Check if it's referencing a known location
+        if (folderName.toLowerCase() === 'documents') {
+          destination = join(homedir(), "Documents");
+        } else if (folderName.toLowerCase() === 'pictures' || folderName.toLowerCase() === 'photos') {
+          destination = join(homedir(), "Pictures");
+        } else if (folderName.toLowerCase() === 'downloads') {
+          destination = join(homedir(), "Downloads");
+        } else {
+          // Assume it's a subfolder in Documents
+          destination = join(homedir(), "Documents", folderName);
+        }
+      }
+    }
+    
+    // Also check for patterns like "Documents/Screenshots" or "in Documents"
+    const inFolderMatch = text.match(/(?:in|into)\s+([\/\w\s]+?)(?:\s+folder)?(?:\s|$)/i);
+    if (inFolderMatch && !folderMatch) {
+      const path = inFolderMatch[1].trim();
+      if (path.toLowerCase().includes('documents')) {
+        // Extract subfolder after Documents
+        const subfolderMatch = path.match(/documents[\/\s]+(\w+)/i);
+        if (subfolderMatch) {
+          destination = join(homedir(), "Documents", subfolderMatch[1]);
+        }
+      }
     }
     
     // Create step
@@ -257,7 +307,7 @@ class AutoClaudeServer {
     this.server = new Server(
       {
         name: "autoclaude",
-        version: "1.0.0",
+        version: "1.2.0",
       },
       {
         capabilities: {
@@ -625,9 +675,28 @@ class AutoClaudeServer {
     
     for (const file of files) {
       const srcPath = pattern ? join(source, file) : file;
-      const destPath = pattern ? join(destination, basename(file)) : destination;
+      // Fix: Ensure destination is treated as a directory when pattern is used
+      let destPath;
+      if (pattern) {
+        // When moving multiple files, destination should be a directory
+        destPath = join(destination, basename(file));
+      } else {
+        // When moving a single file, check if destination is a directory
+        try {
+          const destStats = await stat(destination);
+          if (destStats.isDirectory()) {
+            destPath = join(destination, basename(srcPath));
+          } else {
+            destPath = destination;
+          }
+        } catch (error) {
+          // Destination doesn't exist, treat as target filename
+          destPath = destination;
+        }
+      }
       
       try {
+        // Ensure destination directory exists (including subdirectories)
         await mkdir(dirname(destPath), { recursive: true });
         await rename(srcPath, destPath);
       } catch (error) {
@@ -1333,3 +1402,4 @@ console.error(`Data directory: ${CONFIG.DATA_DIR}`);
 console.error(`Logs directory: ${CONFIG.LOGS_DIR}`);
 console.error(`System commands enabled: ${CONFIG.ENABLE_SYSTEM_COMMANDS}`);
 console.error(`Platform: ${platform()}`);
+console.error(`Allowed directories: ${CONFIG.ALLOWED_DIRECTORIES.join(', ')}`);

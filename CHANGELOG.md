@@ -1,5 +1,45 @@
 # AutoClaude Changelog
 
+## Version 1.2.0 (Directory UI & Subdirectory Fix)
+
+### ✨ New Features
+1. **Directory Picker UI**
+   - Changed from comma-separated text input to multiple directory picker
+   - Each directory gets its own line with folder icon
+   - Matches the UI pattern of the filesystem extension
+   - Directories passed as command line arguments
+
+### 🐛 Bug Fixes
+1. **Subdirectory Creation Fixed**
+   - Screenshots folder in Documents now properly created
+   - Better path handling for nested directories
+   - Supports patterns like "Documents/Screenshots" or "to Screenshots folder in Documents"
+   - Automatically creates subdirectories with `recursive: true`
+
+2. **Natural Language Parser Improvements**
+   - Better recognition of subdirectory paths
+   - Handles variations like:
+     - "to Screenshots folder in Documents"
+     - "to Documents/Screenshots"
+     - "to a Screenshots folder"
+   - Smart destination detection for common folders
+
+3. **File Move Operation Enhanced**
+   - Properly handles destination as directory vs filename
+   - Creates intermediate directories as needed
+   - Better error handling for cross-device moves
+
+### 🔧 Technical Changes
+1. **Configuration Updates**
+   - Changed `allowed_directories` from string to directory type
+   - Added `multiple: true` and `required: true` flags
+   - Removed default paths (user must select)
+
+2. **Server Updates**
+   - Parse directories from command line arguments
+   - Enhanced logging shows allowed directories
+   - Better path expansion and validation
+
 ## Version 1.1.0 (Fixed Version)
 
 ### 🚨 Critical Fixes

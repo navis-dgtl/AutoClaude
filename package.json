@@ -1,6 +1,6 @@
 {
   "name": "autoclaude-dxt",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Natural language workflow automation and scheduling system for Claude Desktop",
   "main": "server/index.js",
   "type": "module",
@@ -47,7 +47,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/navis-dgtl/autoclaude-dxt"
+    "url": "https://github.com/navis-dgtl/autoclaude"
   },
   "files": [
     "server/",
