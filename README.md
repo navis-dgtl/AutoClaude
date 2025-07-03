@@ -1,4 +1,4 @@
-# AutoClaude - Automation & Workflow Manager (v1.2.0)
+# ![AutoClaude Icon](https://raw.githubusercontent.com/navis-dgtl/AutoClaude/refs/heads/main/icon.png) AutoClaude - Automation & Workflow Manager (v1.2.0)
 
 ## 🤖 Natural Language Automation for Claude Desktop
 
